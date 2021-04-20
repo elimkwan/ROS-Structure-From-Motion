@@ -1,0 +1,46 @@
+**** Updated on On Git Gist
+
+sudo docker build -t ros-quad .
+
+docker run -it \
+--volume /home/elim/Documents/Cambridge-Master/Mobile-Robotics-Sys/mini/project:/root/hector_quadrotor_tutorial \
+--env DISPLAY=$DISPLAY \
+--env QT_X11_NO_MITSHM=1 \
+--volume /tmp/.X11-unix/:/tmp/.X11-unix \
+--gpus all \
+--name mrs-mini ros-quad
+
+xhost +local:root
+xhost -local:root
+docker exec -it mrs-mini bash
+
+# Setup hector quadrotor package:
+cd ~/hector_quadrotor_tutorial
+wstool init src https://raw.githubusercontent.com/tu-darmstadt-ros-pkg/hector_quadrotor/kinetic-devel/tutorials.rosinstall
+sudo apt-get install ros-kinetic-geographic-info
+sudo apt-key del 421C365BD9FF1F717815A3895523BAEEB01FA116
+sudo -E apt-key adv --keyserver 'hkp://keyserver.ubuntu.com:80' --recv-key C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654
+sudo apt clean && sudo apt update
+sudo apt-get install ros-kinetic-gazebo-ros-control
+sudo apt-get install ros-kinetic-teleop-twist-keyboard
+
+# Setup the project
+cd ~/hector_quadrotor_tutorial
+catkin_make
+source devel/setup.bash
+roslaunch hector_quadrotor_demo outdoor_flight_gazebo.launch
+roslaunch hector_quadrotor_gazebo quadrotor_empty_world.launch
+
+# Enable the Motor on a separate terminal
+source devel/setup.bash
+rosservice call enable_motors true
+rosrun teleop_twist_keyboard teleop_twist_keyboard.py
+
+# Add permission 
+sudo chmod -R a+w *
+
+rqt_graph
+roslaunch hector_quadrotor_demo duck_flight_gazebo.launch
+
+
+
