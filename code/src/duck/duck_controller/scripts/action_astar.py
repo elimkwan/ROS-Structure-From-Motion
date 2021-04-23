@@ -90,39 +90,6 @@ class Laser2PC():
   def measurements(self):
     return self._measurements
 
-class TrajectoryListener():
-  def __init__(self):
-    self._path = [float('inf')]
-    self._tf = TransformListener()
-    self.sub = rospy.Subscriber('/exploration_path', Path, self.CallBack)
-    self.used_path = False
-
-  def CallBack(self, data):
-    # rospy.loginfo(rospy.get_caller_id() + 'Path %s', data)
-    path = []
-
-    # Get pose in path w.r.t. map.
-    a = 'world'
-    b = 'base_link'
-    if self._tf.frameExists(a) and self._tf.frameExists(b):
-      try:
-        for u in data.poses:
-          t = rospy.Time(0)
-          position, orientation = self._tf.lookupTransform('/' + a, '/' + b, t)
-          x = position[X]
-          y = position[Y]
-          z = position[Z]
-          roll, pitch, yaw = euler_from_quaternion(orientation)
-          path.append((x,y,z,roll,pitch,yaw))
-
-      except Exception as e:
-        print(e)
-    else:
-      print('TF Unable to find:', self._tf.frameExists(a), self._tf.frameExists(b))
-
-    self._path = path
-    self.used_path = False
-
 class pcScan_to_pcWorld():
   def __init__(self):
     self.pcSub = rospy.Subscriber('/slam_cloud', pc, self.callback)
@@ -133,17 +100,18 @@ class pcScan_to_pcWorld():
   
   def callback(self,data):
     self.laser_pc = data
+
+  def update(self):
     target_frame = "world"
     src_frame = "laser0_frame"
     if self._tf.frameExists(target_frame) and self._tf.frameExists(src_frame):
       try:
-        self.mat_laser2world = self._tf.asMatrix(target_frame, data.header)
+        self.mat_laser2world = self._tf.asMatrix(target_frame, self.laser_pc.header)
       except Exception as e:
         print(e)
     else:
       print('Unable to find:', self._tf.frameExists(target_frame), self._tf.frameExists(src_frame))
 
-  def update(self):
     if not isinstance(self.laser_pc,pc) or not isinstance(self.mat_laser2world, np.ndarray) :
       return
     try:
@@ -190,57 +158,6 @@ class Localisation():
   def get_pose(self):
     return (self.pose.pose.position.x,self.pose.pose.position.y,self.pose.pose.position.z)
 
-def get_velocity(position, path_points, goal = None):
-  def altitude_control(p):
-    p[Z] = np.clip(p[Z], 1.5, None)
-    return p
-
-  if len(path_points) == 1 and isinstance(goal, np.ndarray):
-    return altitude_control(goal)
-  if len(path_points) < 2:
-    return altitude_control(position)
-
-  MAX_SPEED = 5
-  v = np.zeros_like(position)
-  if len(path_points) == 0:
-    return v
-  # Stop moving if the goal is reached.
-  if np.linalg.norm(position - path_points[-1]) < .2:
-    return v
-
-  distance = []
-  for points in path_points:
-    distance.append(np.linalg.norm(position - points))
-
-  distance = np.array(distance)
-  min_index = np.argmin(distance.flatten())
-  error = distance[min_index]
-  print("Min index", min_index)
-  print("Error", error)
-
-  scale = (2/(1+np.exp((1/0.3)*(error-0.6))))
-
-  v = (path_points[min_index + 1] - path_points[min_index]) * scale
-  # v.clip(MAX_SPEED, MAX_SPEED)
-  # target_position = position + v
-  target_position = path_points[min_index + 1]
-  return altitude_control(target_position)
-
-def getRandomPose():
-  while(True):
-    num = np.random.uniform(1,9,1)
-    if num < 4 or num > 6:
-      break
-  x = num
-  while(True):
-    num = np.random.uniform(1,9,1)
-    if num < 4 or num > 6:
-      break
-  y = num
-
-  z = np.random.uniform(1,5,1)
-  return [x,y,z]
-
 class Cube:
   def __init__(self, center):
       self.key = np.array(center)
@@ -272,6 +189,7 @@ class OccupancyGrid():
     # idx = np.random.randint(len(self.free_space))
     if len(self.free_space) < 1:
       # a = self.next(self.values[cur_postion], 0)
+      rospy.loginfo("No Free Space Detected")
       return self.values[cur_postion]
 
     max_distance = 2
@@ -354,31 +272,76 @@ class OccupancyGrid():
   def estimate(self, node, goal, t):
     return np.linalg.norm(node.center - goal.center)
 
+def get_velocity(position, path_points, goal = None):
+  # PID Controller for velocity
+  def altitude_control(p):
+    p[X] = np.clip(p[X], 1.5, 8.5)
+    p[Y] = np.clip(p[X], 1.5, 8.5)
+    p[Z] = np.clip(p[Z], 1, 5)
+    return p
+
+  if len(path_points) == 1 and isinstance(goal, np.ndarray):
+    return altitude_control(goal)
+  if len(path_points) < 2:
+    return altitude_control(position)
+
+  MAX_SPEED = 1
+  v = np.zeros_like(position)
+  if len(path_points) == 0:
+    return v
+  # Stop moving if the goal is reached.
+  if np.linalg.norm(position - path_points[-1]) < .1:
+    return v
+
+  distance = []
+  for points in path_points:
+    distance.append(np.linalg.norm(position - points))
+
+  distance = np.array(distance)
+  min_index = np.argmin(distance.flatten())
+  error = distance[min_index]
+  rospy.loginfo("Min index: %d", min_index)
+  # print("Error", error)
+
+  scale = (MAX_SPEED/(1+np.exp((1/0.3)*(error-0.6))))
+
+  # print("Scaling velocity", scale)
+  v = (path_points[min_index + 1] - path_points[min_index]) * scale
+  target_position = path_points[min_index] + v
+  # target_position = path_points[min_index + 1]
+  return altitude_control(target_position)
 
 def get_path(cube_path, suggested_goal):
   path = []
-  distance = 0.05
+  distance = 0.1
 
   # Random Walk Mode
   if len(cube_path) == 1:
     cube_path.append(suggested_goal)
+    rospy.loginfo("Random Walk")
+  else:
+    rospy.loginfo("ASar")
   
   # AStar Mode
-  print("Init Path Length", len(cube_path))
+  # print("Init Path Length", len(cube_path))
   for idx in range(1, len(cube_path)):
     past = cube_path[idx-1].center
     cur = cube_path[idx].center
-    print("past", past, "cur", cur)
 
-    x = np.linspace(past[X], cur[X], 10)
-    y = np.linspace(past[Y], cur[Y], 10)
-    z = np.linspace(past[Z], cur[Z], 10)
-    print("x",x)
+    a = abs(past[X]-cur[X])/distance
+    b = abs(past[Y]-cur[Y])/distance
+    c = abs(past[Z]-cur[Z])/distance
+    num_of_sample = max(a,b,c)
+    # print("Num of sample", num_of_sample)
+
+    x = np.linspace(past[X], cur[X], num_of_sample)
+    y = np.linspace(past[Y], cur[Y], num_of_sample)
+    z = np.linspace(past[Z], cur[Z], num_of_sample)
+
     coords = zip(x,y,z)
-    print("coord", coords)
     for pt in coords:
       path.append(np.array(pt))
-  print("New Path Length", len(path))
+  # print("New Path Length", len(path))
   return path
 
 def run():
@@ -387,9 +350,6 @@ def run():
 
   #for the octomap
   pointcloud2_publisher = Laser2PC()
-  # trajectorySub = TrajectoryListener()
-  # get_exploration_path = rospy.ServiceProxy('get_exploration_path', GetRobotTrajectory)
-  # rospy.wait_for_service('get_exploration_path')
 
   point_cloud = pcScan_to_pcWorld()
   localisation = Localisation()
@@ -431,6 +391,7 @@ def run():
   while not rospy.is_shutdown():
     point_cloud.update()
     current_time = rospy.Time.now().to_sec()
+
     if not point_cloud.ready():
       rospy.loginfo("Not Ready")
       rate_limiter.sleep()
@@ -448,17 +409,14 @@ def run():
       g.target_pose.pose.position.y = moveit[Y]
       g.target_pose.pose.position.z = moveit[Z]
       rospy.loginfo("Sending goal")
-      print("cur path", current_path)
-      print("Moveit",position)
       client.send_goal(g)
       client.wait_for_result()
-
       # Increment Frame
       frame_id += 1
 
-    # Update plan every 1s.
+    # Update plan every 3s.
     time_since = current_time - previous_time
-    if current_path and time_since < 2.:
+    if current_path and time_since < 4.:
       # trajectory = [float('inf')]
       rate_limiter.sleep()
       continue
@@ -475,19 +433,19 @@ def run():
     suggested_goal = occupancy_grid.get_random_goal(position)
     print("Set Goal Location:", suggested_goal.key)
     cube_path = astar.astar(occupancy_grid, start, suggested_goal)
-    print("New Path Avalibale")
+    # print("New Path Avalibale")
     current_path = get_path(cube_path, suggested_goal)
 
     # Publish path to RViz.
     path_msg = Path()
     path_msg.header.seq = frame_id
     path_msg.header.stamp = rospy.Time.now()
-    path_msg.header.frame_id = 'map'
+    path_msg.header.frame_id = 'world'
     for u in current_path:
       pose_msg = PoseStamped()
       pose_msg.header.seq = frame_id
       pose_msg.header.stamp = path_msg.header.stamp
-      pose_msg.header.frame_id = 'map'
+      pose_msg.header.frame_id = 'world'
       pose_msg.pose.position.x = u[X]
       pose_msg.pose.position.y = u[Y]
       pose_msg.pose.position.z = u[Z]
