@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+
+<launch>
+  <include file="$(find duck_world)/launch/start.launch">
+   <arg name="world" value="$(find duck_world)/worlds/duck.world"/> 
+  </include>
+
+</launch>
