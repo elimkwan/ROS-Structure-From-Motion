@@ -1,5 +1,0 @@
-<?xml version="1.0"?>
-
-<launch>
-	<node name="duck_controller_node" pkg="duck_controller" type="next_best_view.py" output="screen"></node>
-</launch>

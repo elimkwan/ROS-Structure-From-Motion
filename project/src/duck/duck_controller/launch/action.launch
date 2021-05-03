@@ -1,5 +1,0 @@
-<?xml version="1.0"?>
-
-<launch>
-	<node name="duck_action_node" pkg="duck_controller" type="action.py" output="screen"></node>
-</launch>
