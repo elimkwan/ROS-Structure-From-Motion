@@ -24,6 +24,7 @@ catkin_install_python(PROGRAMS
   scripts/action_openloop.py
   scripts/action_rrt.py
   scripts/action_astar.py
+  scripts/action_frontier.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

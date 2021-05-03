@@ -2,7 +2,7 @@
 
 <launch>
   <include file="$(find duck_world)/launch/start.launch">
-   <arg name="world" value="$(find duck_world)/worlds/duck.world"/> 
+   <arg name="world" value="$(find duck_world)/worlds/3duck.world"/> 
   </include>
 
 </launch>

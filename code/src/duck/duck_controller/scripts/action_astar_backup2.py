@@ -66,110 +66,6 @@ OCCUPIED = 2
 ROBOT_SIZE = [0.5,0.5,0.5]
 np.random.seed(42)
 
-class Laser2PCWorld():
-  #translate laser to pc and publish point cloud to /cloud_in
-  def __init__(self):
-    self.laserSub = rospy.Subscriber('/scan', LaserScan, self.laserCallBack)
-    self.laser = [float('inf')]
-    self.pc_laser = None
-    self.pc_world = None
-    self._tf = TransformListener()
-    self.occupied_cells = []
-    self.free_cells = []
-    self.mat_laser2world = None
-
-  def laserCallBack(self, data):
-    self.laser = data
-
-  def update(self):
-    # Get the transformation matrix for laser to world
-    target_frame = "world"
-    src_frame = "laser0_frame"
-    if self._tf.frameExists(target_frame) and self._tf.frameExists(src_frame):
-      try:
-        self.mat_laser2world = self._tf.asMatrix(target_frame, self.laser.header)
-      except Exception as e:
-        print(e)
-    else:
-      print('Unable to find:', self._tf.frameExists(target_frame), self._tf.frameExists(src_frame))
-
-    # Transform laser data to world coordinate
-    if not isinstance(self.laser, LaserScan) or not isinstance(self.mat_laser2world, np.ndarray) :
-      return
-    try:
-      l = copy.deepcopy(self.laser)
-      mat = copy.deepcopy(self.mat_laser2world)
-
-      free = [] #in world coord
-      occuiped = [] #in world coord
-      pc_laser = []
-      pc_world = []
-      for r in range(len(l.ranges)):
-        radius = 0
-        encountered_obs = True
-        if l.ranges[r] == float('inf'):
-          #append free cells till max range
-          radius = l.range_max
-          encountered_obs = False
-
-        theta = 180 - (l.angle_min + r * l.angle_increment) #due to differences in ros corrdinate frame
-        x = l.ranges[radius] * np.cos(theta)
-        y = l.ranges[radius] * np.sin(theta)
-        z = 0
-
-        pc_laser.append([x,y,z])
-        col = np.array([[x,y,z,1]]).T
-        tran = np.matmul(mat, col).reshape((4))
-        pc_world.append([tran[X],tran[Y],tran[X]])
-
-        discretized_pt = self.append_free_space([tran[X],tran[Y],tran[X]])
-        # print("discretized_pt", len(discretized_pt))
-        if encountered_obs:
-          # print("before", len(occuiped))
-          occuiped.extend(discretized_pt[-10:])
-          # print("pt", discretized_pt[-10:])
-          free.extend(discretized_pt[:-10])
-          # print("after", len(occuiped))
-        else:
-          free.extend(discretized_pt)
-        # print("encoutered obs", encountered_obs)
-        # print("occuipied", len(occuiped))
-        # print("free", len(free))
-
-      self.pc_laser = pc_laser
-      self.pc_world = pc_world
-      self.occupied_cells = occuiped
-      self.free_cells = free
-    except Exception as e:
-      print(e)
-
-  def append_free_space(self, pt):
-    distance = 0.05
-    a = abs(pt[X])/distance
-    b = abs(pt[Y])/distance
-    c = abs(pt[Z])/distance
-    num_of_sample = max(a,b,c)
-
-    x = np.linspace(0, pt[X], num_of_sample)
-    y = np.linspace(0, pt[Y], num_of_sample)
-    z = np.linspace(0, pt[Z], num_of_sample)
-    coords = zip(x,y,z)
-    return coords
-
-    # arr = [[c[X],c[Y],c[Z]] for c in coords]
-    # return np.array(arr)
-
-  @property
-  def ready(self):
-    laser_ready = isinstance(self.laser, LaserScan)
-    mat_ready = isinstance(self.mat_laser2world, np.ndarray)
-    return laser_ready and mat_ready
-
-  @property
-  def measurements(self):
-    return self._measurements
-
-# For the purpose of Octomap only
 class Laser2PC():
   #translate laser to pc and publish point cloud to /cloud_in
   def __init__(self):
@@ -194,6 +90,112 @@ class Laser2PC():
   @property
   def measurements(self):
     return self._measurements
+
+class pcScan_to_pcWorld():
+  def __init__(self):
+    self.pcSub = rospy.Subscriber('/slam_cloud', pc, self.callback)
+    self._tf = TransformListener()
+    self.laser_pc = None
+    self.mat_laser2world = None
+    self.world_pc = None
+    self.laser_pc_sync = None
+  
+  def callback(self,data):
+    self.laser_pc = data
+
+  def update(self):
+    target_frame = "world"
+    src_frame = "laser0_frame"
+    if self._tf.frameExists(target_frame) and self._tf.frameExists(src_frame):
+      try:
+        self.mat_laser2world = self._tf.asMatrix(target_frame, self.laser_pc.header)
+      except Exception as e:
+        print(e)
+    else:
+      print('Unable to find:', self._tf.frameExists(target_frame), self._tf.frameExists(src_frame))
+
+    if not isinstance(self.laser_pc,pc) or not isinstance(self.mat_laser2world, np.ndarray) :
+      return
+    try:
+      lpc = copy.deepcopy(self.laser_pc)
+      mat = copy.deepcopy(self.mat_laser2world)
+      wpc = copy.deepcopy(self.laser_pc)
+      for idx,p in enumerate(np.array(lpc.points)):
+        col = np.array([[float(p.x), float(p.y), float(p.z), 1.0]]).T
+        tran_p = np.matmul(mat, col).reshape((4))
+        wpc.points[idx].x = tran_p[X]
+        wpc.points[idx].y = tran_p[Y]
+        wpc.points[idx].z = tran_p[Z]
+      self.world_pc = wpc
+      self.laser_pc_sync = lpc
+    except Exception as e:
+      print(e)
+
+  def get_Cell(self):
+    thres = 0.05 #threshold to be considered as occupied
+    pt = copy.deepcopy(self.world_pc.points)
+    val = copy.deepcopy(self.world_pc.channels[0].values) #'Point Cloud intensities channel'
+    mat = copy.deepcopy(self.mat_laser2world)
+    pt = list(pt)
+    val = np.array(val)
+    laser_pt = copy.deepcopy(self.laser_pc_sync.points)
+    laser_pt = list(laser_pt)
+
+    # trans_pt = [[p.x, p.y, p.z] for p in pt]
+    # trans_pt = np.array(trans_pt)
+    # occupied_world = trans_pt[val < thres] 
+    # print("len val", val.shape)
+    # print("len laser pt", len(laser_pt))
+    # trans_laser_pt = [[p.x, p.y, p.z] for p in laser_pt]
+    # trans_laser_pt = np.array(trans_laser_pt)
+    # print("len trans laser pt", trans_laser_pt.shape)
+    # occupied_laser = trans_laser_pt[val < thres] 
+
+    occupied_world = []
+    occupied_laser = []
+    print("len", len(pt), len(val), len(laser_pt))
+    for i in range(min(len(pt), len(val), len(laser_pt))):
+      # print("val", val[i])
+      if val[i] and val[i] > thres:
+        occupied_world.append([pt[i].x,pt[i].y,pt[i].z])
+        occupied_laser.append([laser_pt[i].x,laser_pt[i].y,laser_pt[i].z])
+
+    occupied_world = np.array(occupied_world)
+    occupied_laser = np.array(occupied_laser )
+
+    print("occuiped world", occupied_world.shape)
+    print("occuiped laser", occupied_laser)
+
+    #Calculate free space based on distance from obstacles
+    free_world = []
+    distance = 0.5
+    for pt in occupied_laser:
+      a = abs(pt[X])/distance
+      b = abs(pt[Y])/distance
+      c = abs(pt[Z])/distance
+      num_of_sample = max(a,b,c)
+
+      x = np.linspace(0, pt[X], num_of_sample)
+      y = np.linspace(0, pt[Y], num_of_sample)
+      z = np.linspace(0, pt[Z], num_of_sample)
+
+      coords = zip(x,y,z)
+      for c in coords:
+        #Translate back to World Coordinate
+        col = np.array([[float(c[X]), float(c[Y]), float(c[Z]), 1.0]]).T
+        tran_p = np.matmul(mat, col).reshape((4))
+        wx = tran_p[X]
+        wy = tran_p[Y]
+        wz = tran_p[Z]
+
+        free_world.append((wx,wy,wz))
+
+    # print("Occupied", len(occupied_world), "Free", len(free_world))
+
+    return occupied_world,free_world
+
+  def ready(self):
+    return isinstance(self.world_pc,pc)
 
 class Localisation():
   def __init__(self):
@@ -229,6 +231,10 @@ class OccupancyGrid():
     self.free_space = []
     self.map_percentage = 0
 
+    # self.resolution = [0.05,0.05,0.05]
+    # self.high_res_grid_sz = np.divide(world_sz, self.resolution)
+    # self.high_resolution_grid = np.ones((self.high_res_grid_sz))
+  
   def get_map_percentage(self):
     total = len(self.values.keys())
     unknown = 0
@@ -271,12 +277,9 @@ class OccupancyGrid():
   def random_walk(self, cur_postion):
     def altitude_control(pos):
       p = np.array(pos)
-      # p[X] = np.clip(p[X], 0.3, 8.5)
-      # p[Y] = np.clip(p[X], 0.3, 8.5)
-      # p[Z] = np.clip(p[Z], 0.1, 2.3)
-      p[X] = np.random.randint(3,8) if (p[X] < 2 or p[X] > 8.5) else p[X]
-      p[Y] = np.random.randint(3,8) if (p[Y] < 2 or p[Y] > 8.5) else p[Y]
-      p[Z] = 2 if (p[Z] < 0.1 or p[Z] > 3) else p[Z]
+      p[X] = np.clip(p[X], 0.3, 8.5)
+      p[Y] = np.clip(p[X], 0.3, 8.5)
+      p[Z] = np.clip(p[Z], 0.1, 2.3)
       return tuple(p)
     transforms = np.array([
       [ 1 , 1 , 0 ],
@@ -329,6 +332,10 @@ class OccupancyGrid():
 
     idx = np.random.randint(len(neighbour))
     target = neighbour[idx][0]
+    # print("cur_postion", cur_postion)
+    # print("cur_key", cur)
+    # print("target key", target_key)
+    # print("transform", transforms[idx])
 
     if np.all(self.get_index(target.key) == self.get_index(cur.key)):
       rospy.loginfo("No Neighbour")
@@ -419,7 +426,7 @@ class OccupancyGrid():
     for trans in transforms:
       new_key = cur_key + trans
       if self.is_valid(new_key) and self.is_free(self.key_to_center_pos(new_key)):
-        # print("Found free space")
+        print("Found free space")
         n.append((self.values[tuple(new_key)],t))
     return n
 
@@ -430,22 +437,18 @@ def get_velocity(position, path_points, goal = None):
   # PID Controller for velocity
   def altitude_control(pos):
     p = np.array(pos)
-    # p[X] = np.clip(p[X], 0.3, 8.5)
-    # p[Y] = np.clip(p[X], 0.3, 8.5)
-    # p[Z] = np.clip(p[Z], 0.1, 2.3)
-    p[X] = np.random.randint(3,8) if (p[X] < 2 or p[X] > 8.5) else p[X]
-    p[Y] = np.random.randint(3,8) if (p[Y] < 2 or p[Y] > 8.5) else p[Y]
-    p[Z] = 2 if (p[Z] < 0.1 or p[Z] > 3) else p[Z]
-    return tuple(p)
+    p[X] = np.clip(p[X], 1.5, 8.5)
+    p[Y] = np.clip(p[X], 1.5, 8.5)
+    p[Z] = np.clip(p[Z], 0.3, 5)
+    # return tuple(p)
+    return pos
 
-  # if len(path_points) == 1 and isinstance(goal, np.ndarray):
-  #   return altitude_control(goal)
-  # if len(path_points) < 2:
-  #   return altitude_control(position)
+  if len(path_points) == 1 and isinstance(goal, np.ndarray):
+    return altitude_control(goal)
+  if len(path_points) < 2:
+    return altitude_control(position)
 
-  print("here", len(path_points))
-
-  MAX_SPEED = 2
+  MAX_SPEED = 1
   v = np.zeros_like(position)
   if len(path_points) == 0:
     return v
@@ -467,8 +470,7 @@ def get_velocity(position, path_points, goal = None):
   # rospy.loginfo("Min index: %d", min_index)
   # print("Error", error)
 
-  scale = (MAX_SPEED/(1+np.exp((1/0.8)*(error-0.9))))
-  # scale = (MAX_SPEED/(1+np.exp((1/0.3)*(error-0.6))))
+  scale = (MAX_SPEED/(1+np.exp((1/0.3)*(error-0.6))))
 
   # print("Scaling velocity", scale)
   v = (path_points[min_index + 1] - position) * scale
@@ -488,7 +490,7 @@ def get_path(cube_path, suggested_goal):
     # rospy.loginfo("AStar")
   
   # AStar Mode
-  print("Init Path Length", len(cube_path))
+  # print("Init Path Length", len(cube_path))
   for idx in range(1, len(cube_path)):
     past = cube_path[idx-1].center
     cur = cube_path[idx].center
@@ -497,8 +499,7 @@ def get_path(cube_path, suggested_goal):
     b = abs(past[Y]-cur[Y])/distance
     c = abs(past[Z]-cur[Z])/distance
     num_of_sample = max(a,b,c)
-    num_of_sample = np.clip(num_of_sample, 2, None)
-    print("Num of sample", num_of_sample)
+    # print("Num of sample", num_of_sample)
 
     x = np.linspace(past[X], cur[X], num_of_sample)
     y = np.linspace(past[Y], cur[Y], num_of_sample)
@@ -507,17 +508,18 @@ def get_path(cube_path, suggested_goal):
     coords = zip(x,y,z)
     for pt in coords:
       path.append(np.array(pt))
-  print("New Path Length", len(path))
+  # print("New Path Length", len(path))
   return path
 
 def run():
   f = open("/root/hector_quadrotor_tutorial/random_results.csv", "a")
   rospy.init_node('duck_action_node') #Name of publisher
+  # Publish PointCloud
 
   #for the octomap
   pointcloud2_publisher = Laser2PC()
 
-  lasersub = Laser2PCWorld()
+  point_cloud = pcScan_to_pcWorld()
   localisation = Localisation()
   rate_limiter = rospy.Rate(100)
   occupancy_grid = OccupancyGrid((10,10,5))
@@ -554,25 +556,20 @@ def run():
   previous_time = rospy.Time.now().to_sec()
   start_time = rospy.Time.now().to_sec()
   suggested_goal = None
-  goal = None
 
   while not rospy.is_shutdown():
-    if len(current_path) == 0:
-      lasersub.update()
-
+    point_cloud.update()
     current_time = rospy.Time.now().to_sec()
 
-    if not lasersub.ready:
+    if not point_cloud.ready():
       rospy.loginfo("Not Ready")
       rate_limiter.sleep()
       continue
 
     # Follow path
     position = localisation.get_pose()
-    if len(current_path) > 0:
+    if current_path:
       moveit = get_velocity(position, current_path, goal=suggested_goal.center)
-      print("Move it to", moveit)
-      # moveit = current_path[-1]
       # Send it to action library
       g = PoseGoal()
       g.target_pose.header.seq = frame_id
@@ -580,26 +577,22 @@ def run():
       g.target_pose.pose.position.x = moveit[X]
       g.target_pose.pose.position.y = moveit[Y]
       g.target_pose.pose.position.z = moveit[Z]
-      # print("move it", moveit[X], moveit[Y], moveit[Z])
       # rospy.loginfo("Sending goal")
       client.send_goal(g)
       client.wait_for_result()
       # Increment Frame
       frame_id += 1
 
-    # Update plan every 10s.
+    # Update plan every 1s.
     time_since = current_time - previous_time
-    if time_since >= 10.:
-      print("Update Occupancy")
-      lasersub.update()
-    if current_path and time_since < 10.:
+    if current_path and time_since < 4.:
       rate_limiter.sleep()
       continue
     previous_time = current_time
 
-    # Print map exploration progress every 10 sec
+    # Print map exploration progress every 5 sec
     time_since = current_time - start_time
-    if time_since > 10:
+    if time_since > 5:
       occupancy_grid.get_map_percentage()
       rospy.loginfo("-------------------------")
       rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
@@ -612,15 +605,19 @@ def run():
       f.write(str(occupancy_grid.map_percentage) + "\n")
 
     # Get Occuiped Cell (in world coordinate)
-    occupied_cells, free_cells = lasersub.occupied_cells,lasersub.free_cells 
+    occupied_cells, free_cells = point_cloud.get_Cell()
     occupancy_grid.update(occupied_cells, free_cells)
 
     # Run Exploration Planner
     center = occupancy_grid.get_index(position)
+    # start = Cube(center)
     suggested_goal = Cube(center, position) 
+    # occupancy_grid.get_random_goal(position) #random walk get avaliable neighbour
     cube_path = occupancy_grid.random_walk(position)
+    print("Set Goal Location:", cube_path[-1].center)
+    # cube_path = astar.astar(occupancy_grid, start, suggested_goal)
+    # print("New Path Avalibale")
     current_path = get_path(cube_path, suggested_goal)
-
 
     # Publish path to RViz.
     path_msg = Path()

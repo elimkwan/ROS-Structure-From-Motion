@@ -9,6 +9,9 @@ import numpy as np
 import os
 import re
 import scipy.signal
+from scipy import ndimage, misc
+import skimage.filter
+from skimage.util import img_as_float
 import yaml
 import random
 
@@ -36,9 +39,7 @@ import actionlib
 from hector_nav_msgs.srv import GetRobotTrajectory
 
 from octomap_msgs.msg import Octomap as om
-
 from pyoctree import pyoctree as ot
-
 import copy
 
 
@@ -65,6 +66,7 @@ UNKNOWN = 1
 OCCUPIED = 2
 ROBOT_SIZE = [0.5,0.5,0.5]
 np.random.seed(42)
+
 
 class Laser2PCWorld():
   #translate laser to pc and publish point cloud to /cloud_in
@@ -169,7 +171,7 @@ class Laser2PCWorld():
   def measurements(self):
     return self._measurements
 
-# For the purpose of Octomap only
+
 class Laser2PC():
   #translate laser to pc and publish point cloud to /cloud_in
   def __init__(self):
@@ -216,19 +218,25 @@ class Cube:
       self.free = 0 # number of free cells in cube
       self.occuipied = 0 
       self.unknown = 0 
+      self.frontier = True
       self.type = UNKNOWN
 
 class OccupancyGrid():
   def __init__(self, world_sz):
     self.grid_sz = np.divide(world_sz, np.array(ROBOT_SIZE)).astype(np.int32)
-    grid = np.ones((self.grid_sz))
-    grid = np.nonzero(grid)
-    coord = zip(grid[0],grid[1], grid[2])
+    self.grid = np.zeros((self.grid_sz)) #all unknown
+    grid = np.ones((self.grid_sz)) 
+    grid_c = np.nonzero(grid)
+    coord = zip(grid_c[0],grid_c[1], grid_c[2])
     self.world_sz = world_sz
     self.values = {key: Cube(key, self.key_to_center_pos(key)) for key in coord}
     self.free_space = []
     self.map_percentage = 0
 
+    # self.resolution = [0.05,0.05,0.05]
+    # self.high_res_grid_sz = np.divide(world_sz, self.resolution)
+    # self.high_resolution_grid = np.ones((self.high_res_grid_sz))
+  
   def get_map_percentage(self):
     total = len(self.values.keys())
     unknown = 0
@@ -250,23 +258,64 @@ class OccupancyGrid():
     # print("POsition", position, "Type", self.values[self.get_index(position[:3])].type)
     return self.values[self.get_index(position[:3])].type == FREE
 
+  # Frontier with random noise
   def get_random_goal(self, cur_postion):
     # idx = np.random.randint(len(self.free_space))
-    if len(self.free_space) < 1:
+    #With random parbability to use random walk
+    probability = np.random.uniform()
+    if len(self.free_space) < 1 or probability < 0.3:
       rospy.loginfo("No Free Space Detected. Move to neighbour")
-      # table = self.next(self.values[self.get_index(cur_postion)], 0)
-      # return table[0][0]
-      target = np.array(cur_postion) + [-1,-1,0]
-      return self.values[self.get_index(target)]
+      path = self.random_walk(cur_postion)
+      return path[-1]
 
-    max_distance = 2
+    expl_probability = np.random.uniform()
+    max_distance = 6 if expl_probability > 0.5 else 4
+    min_distance = 3 if expl_probability > 0.5 else 2
+    #Proritize Frontier Points
     for n in self.free_space:
-      if np.linalg.norm(np.array(cur_postion)-np.array(n)) < max_distance:
+      frontier = self.values[tuple(n)].frontier 
+      cur_dist = np.linalg.norm(np.array(cur_postion)-np.array(n))
+      if cur_dist < max_distance and cur_dist > min_distance and frontier:
+        rospy.loginfo("Frontier Guided")
+        return self.values[n]
+
+    for n in self.free_space:
+      if cur_dist < max_distance:
         return self.values[n]
 
     rospy.loginfo("Using Random Random Goal Location")
     idx = np.random.randint(len(self.free_space)-1)
     return self.values[self.free_space[idx]]
+
+  #Frontier without random noise
+  # def get_random_goal(self, cur_postion):
+  #   # idx = np.random.randint(len(self.free_space))
+  #   #With random parbability to use random walk
+  #   probability = np.random.uniform()
+  #   if len(self.free_space) < 1:
+  #     rospy.loginfo("No Free Space Detected. Move to neighbour")
+  #     path = self.random_walk(cur_postion)
+  #     # target = np.array(cur_postion) + [-1,-1,0]
+  #     return path[-1]
+
+  #   expl_probability = np.random.uniform()
+  #   max_distance = 4 if expl_probability > 0.5 else 4
+  #   min_distance = 2 if expl_probability > 0.5 else 2
+  #   #Proritize Frontier Points
+  #   for n in self.free_space:
+  #     frontier = self.values[tuple(n)].frontier 
+  #     cur_dist = np.linalg.norm(np.array(cur_postion)-np.array(n))
+  #     if cur_dist < max_distance and cur_dist > min_distance and frontier:
+  #       rospy.loginfo("Frontier Guided")
+  #       return self.values[n]
+
+  #   for n in self.free_space:
+  #     if cur_dist < max_distance:
+  #       return self.values[n]
+
+  #   rospy.loginfo("Using Random Random Goal Location")
+  #   idx = np.random.randint(len(self.free_space)-1)
+  #   return self.values[self.free_space[idx]]
 
   def random_walk(self, cur_postion):
     def altitude_control(pos):
@@ -276,7 +325,7 @@ class OccupancyGrid():
       # p[Z] = np.clip(p[Z], 0.1, 2.3)
       p[X] = np.random.randint(3,8) if (p[X] < 2 or p[X] > 8.5) else p[X]
       p[Y] = np.random.randint(3,8) if (p[Y] < 2 or p[Y] > 8.5) else p[Y]
-      p[Z] = 2 if (p[Z] < 0.1 or p[Z] > 3) else p[Z]
+      p[Z] = 2 if (p[Z] < 0.5 or p[Z] > 3) else p[Z]
       return tuple(p)
     transforms = np.array([
       [ 1 , 1 , 0 ],
@@ -357,31 +406,65 @@ class OccupancyGrid():
     for p in occupied_cells:
       occuiped_space[self.get_index(p[:3])] += 1
 
-    # print("Occuiped", np.count_nonzero(occuiped_space))
-    # print("Free", np.count_nonzero(free_space))
+    print("Occuiped", np.count_nonzero(occuiped_space))
+    print("Free", np.count_nonzero(free_space))
     # print(occuiped_space[:10,:10,:10])
+
 
     for z in range(self.grid_sz[2]):
       for y in range(self.grid_sz[1]):
         for x in range(self.grid_sz[0]):
-          # print("update debug 1", self.values[(x,y,z)].type)
-          # print("update debug 2", occuiped_space[x,y,z], free_space[x,y,z])
           updatable = (self.values[(x,y,z)].type == UNKNOWN) and (occuiped_space[x,y,z] + free_space[x,y,z]) > 5
-          # if free_space[x,y,z] > 10 and updatable:
-          #   rospy.loginfo("Added info to occupancy grid")
-          #   self.values[(x,y,z)].type == FREE
-          #   self.free_space.append(self.key_to_center_pos((x,y,z)))
-          # print("Updatable?", updatable)
-          # if updatable:
-            # print("Updatable")
           if free_space[x,y,z] >= 5 and updatable:
             self.values[(x,y,z)].type = FREE
-            self.free_space.append(self.key_to_center_pos((x,y,z)))
+            self.free_space.append((x,y,z))
+            self.grid[x,y,z] = 255 #Set to known
           if occuiped_space[x,y,z] >= 5 and updatable:
             self.values[(x,y,z)].type = OCCUPIED
-            # rospy.loginfo("Added info to occupancy grid")
+            self.grid[x,y,z] = 255 #Set to known
 
-  def next(self, node, t):
+    self.is_frontier(self.grid) #To set edges as frontier
+
+  def is_frontier(self, value):
+    # set frontier points
+    height = value.shape[-1]
+    for h in range(1):
+      im = np.array(value[:,:,h]).astype(np.uint8)
+      canny = skimage.filter.canny(im, sigma=1)
+      canny = np.nonzero(canny.reshape(value.shape[:2]))
+      idx = zip(*canny)
+      # print("canny", canny)
+      # print("idx",idx)
+      for elem in idx:
+        key = (elem[0], elem[1], h)
+        self.values[key].is_frontier = True
+
+    # Working example of skimage canny 
+    # im = [
+    #   [0,0,0,0,0,255,255,255,255,255,255,255],
+    #   [0,0,0,0,0,255,255,255,255,255,255,255],
+    #   [0,0,0,0,0,255,255,255,255,255,255,255],
+    # ]
+    # im = np.array(im).astype(np.uint8)
+    # # sx = ndimage.sobel(im, axis=0, mode='constant')
+    # # sy = ndimage.sobel(im, axis=1, mode='constant')
+    # # sob = np.hypot(sx, sy)
+    # sob = skimage.filter.canny(im, sigma=1)
+    # print(sob)
+
+  # def is_frontier(self, position):
+  #   unknown_count = 0
+  #   cur = self.values[self.get_index(position)]
+  #   arr = self.next(cur, 0, no_collision_check=True)
+  #   for elem in arr:
+  #     if elem[0].type == UNKNOWN:
+  #       unknown_count += 1
+  #     if unknown_count > 9:
+  #       return True
+  #   return False
+
+
+  def next(self, node, t, no_collision_check=False):
     cur_key = node.key
     n = []
     transforms = np.array([
@@ -411,11 +494,14 @@ class OccupancyGrid():
       [ -1 , -1 , 1 ],
       [ -1 , -1 , 0 ],
       [ -1 , -1 , -1 ]])
-    # k = [1, 0,-1]
-    # for a in k:
-    #   for b in k:
-    #     for c in k:
-    #       print("[",a,",",b,",",c,"],")
+
+    if no_collision_check:
+      for trans in transforms:
+        new_key = cur_key + trans
+        if self.is_valid(new_key):
+          n.append((self.values[tuple(new_key)],t))
+      return n
+
     for trans in transforms:
       new_key = cur_key + trans
       if self.is_valid(new_key) and self.is_free(self.key_to_center_pos(new_key)):
@@ -429,21 +515,21 @@ class OccupancyGrid():
 def get_velocity(position, path_points, goal = None):
   # PID Controller for velocity
   def altitude_control(pos):
-    p = np.array(pos)
-    # p[X] = np.clip(p[X], 0.3, 8.5)
-    # p[Y] = np.clip(p[X], 0.3, 8.5)
-    # p[Z] = np.clip(p[Z], 0.1, 2.3)
-    p[X] = np.random.randint(3,8) if (p[X] < 2 or p[X] > 8.5) else p[X]
-    p[Y] = np.random.randint(3,8) if (p[Y] < 2 or p[Y] > 8.5) else p[Y]
-    p[Z] = 2 if (p[Z] < 0.1 or p[Z] > 3) else p[Z]
-    return tuple(p)
+      p = np.array(pos)
+      # p[X] = np.clip(p[X], 0.3, 8.5)
+      # p[Y] = np.clip(p[X], 0.3, 8.5)
+      # p[Z] = np.clip(p[Z], 0.1, 2.3)
+      p[X] = np.random.randint(3,8) if (p[X] < 2 or p[X] > 8.5) else p[X]
+      p[Y] = np.random.randint(3,8) if (p[Y] < 2 or p[Y] > 8.5) else p[Y]
+      p[Z] = 2 if (p[Z] < 0.5 or p[Z] > 3) else p[Z]
+      return tuple(p)
 
-  # if len(path_points) == 1 and isinstance(goal, np.ndarray):
-  #   return altitude_control(goal)
-  # if len(path_points) < 2:
-  #   return altitude_control(position)
-
-  print("here", len(path_points))
+  if len(path_points) == 1 and isinstance(goal, np.ndarray):
+    print("Path Point Size = 1 and suggested goal is avaliable")
+    return altitude_control(goal)
+  if len(path_points) < 2:
+    print("Path Point Size = 1")
+    return altitude_control(position)
 
   MAX_SPEED = 2
   v = np.zeros_like(position)
@@ -467,13 +553,14 @@ def get_velocity(position, path_points, goal = None):
   # rospy.loginfo("Min index: %d", min_index)
   # print("Error", error)
 
-  scale = (MAX_SPEED/(1+np.exp((1/0.8)*(error-0.9))))
   # scale = (MAX_SPEED/(1+np.exp((1/0.3)*(error-0.6))))
+  scale = (MAX_SPEED/(1+np.exp((1/0.8)*(error-0.9))))
 
   # print("Scaling velocity", scale)
+  # v = (path_points[min_index + 1] - path_points[min_index]) * scale
+  # target_position = path_points[min_index] + v
   v = (path_points[min_index + 1] - position) * scale
   target_position = position + v
-  # target_position = path_points[min_index + 1]
   return altitude_control(target_position)
 
 def get_path(cube_path, suggested_goal):
@@ -484,11 +571,9 @@ def get_path(cube_path, suggested_goal):
   if len(cube_path) == 1:
     cube_path.append(suggested_goal)
     rospy.loginfo("Random Walk Big Steps")
-  # else:
-    # rospy.loginfo("AStar")
   
   # AStar Mode
-  print("Init Path Length", len(cube_path))
+  # print("Init Path Length", len(cube_path))
   for idx in range(1, len(cube_path)):
     past = cube_path[idx-1].center
     cur = cube_path[idx].center
@@ -496,7 +581,7 @@ def get_path(cube_path, suggested_goal):
     a = abs(past[X]-cur[X])/distance
     b = abs(past[Y]-cur[Y])/distance
     c = abs(past[Z]-cur[Z])/distance
-    num_of_sample = max(a,b,c)
+    num_of_sample = round(max(a,b,c))
     num_of_sample = np.clip(num_of_sample, 2, None)
     print("Num of sample", num_of_sample)
 
@@ -507,13 +592,13 @@ def get_path(cube_path, suggested_goal):
     coords = zip(x,y,z)
     for pt in coords:
       path.append(np.array(pt))
-  print("New Path Length", len(path))
+  # print("New Path Length", len(path))
   return path
 
 def run():
-  f = open("/root/hector_quadrotor_tutorial/random_results.csv", "a")
+  f = open("/root/hector_quadrotor_tutorial/front_results.csv", "a")
   rospy.init_node('duck_action_node') #Name of publisher
-
+  
   #for the octomap
   pointcloud2_publisher = Laser2PC()
 
@@ -554,7 +639,6 @@ def run():
   previous_time = rospy.Time.now().to_sec()
   start_time = rospy.Time.now().to_sec()
   suggested_goal = None
-  goal = None
 
   while not rospy.is_shutdown():
     if len(current_path) == 0:
@@ -599,13 +683,9 @@ def run():
 
     # Print map exploration progress every 10 sec
     time_since = current_time - start_time
-    if time_since > 10:
+    if time_since > 5:
       occupancy_grid.get_map_percentage()
       rospy.loginfo("-------------------------")
-      rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
-      rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
-      rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
-      rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
       rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
       rospy.loginfo("Mapping percentage %s", occupancy_grid.map_percentage)
       start_time = current_time
@@ -617,10 +697,11 @@ def run():
 
     # Run Exploration Planner
     center = occupancy_grid.get_index(position)
-    suggested_goal = Cube(center, position) 
-    cube_path = occupancy_grid.random_walk(position)
+    start = Cube(center, position)
+    suggested_goal = occupancy_grid.get_random_goal(position) #random walk get avaliable neighbour
+    print("Set Goal Location:", suggested_goal.center)
+    cube_path = astar.astar(occupancy_grid, start, suggested_goal)
     current_path = get_path(cube_path, suggested_goal)
-
 
     # Publish path to RViz.
     path_msg = Path()
