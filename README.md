@@ -1,4 +1,4 @@
-Structure reconstruction using drones.
+Structure reconstruction using drone.
 
 ### Run Scheme - Random Walk
 Run the following commands in separate terminal windows. 
