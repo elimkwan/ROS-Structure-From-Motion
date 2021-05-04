@@ -1,5 +1,8 @@
 Structure reconstruction using drone.
 
+### Demo
+Demo video available - frontier_exploration_demo.mp4
+
 ### Run Scheme - Predefined Path
 Run the following commands in separate terminal windows. 
 ```
